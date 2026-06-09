@@ -1,0 +1,26 @@
+[project]
+name = "heimdall-gate"
+version = "0.1.0"
+description = "Streaming gateway for business listing events: Yelp -> Kafka -> Spark/Delta on Databricks"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["."]
+filterwarnings = [
+    "ignore::DeprecationWarning:pydantic.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["databricks/jobs", "databricks/notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF", "SLF", "BLE"]
+ignore = [
+    "E501",   # line length, ruff format handles it
+    "BLE001", # we deliberately catch broad exceptions in sweep loop
+    "SLF001", # __main__ pokes into producer internals; documented
+]

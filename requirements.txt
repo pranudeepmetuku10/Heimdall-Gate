@@ -1,0 +1,10 @@
+# Runtime dependencies for the ingestion service.
+# Spark/Delta deps are provided by the Databricks runtime and are NOT pinned here.
+
+confluent-kafka==2.5.3
+httpx==0.27.2
+pydantic==2.8.2
+pydantic-settings==2.4.0
+tenacity==9.0.0
+python-dotenv==1.0.1
+orjson==3.10.7
