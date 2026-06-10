@@ -10,6 +10,8 @@
 #   gold_rating_drift_table      heimdall.gold.rating_drift_daily
 #   gold_category_trends_table   heimdall.gold.category_trends_daily
 
+import datetime as dt
+
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
@@ -36,65 +38,83 @@ def main() -> None:
         "gold_category_trends_table", "heimdall.gold.category_trends_daily"
     )
 
+    # Compute the recompute window ONCE, in the driver, as a literal date.
+    # We reuse the same literal for both the read-side filter and the
+    # Delta replaceWhere predicate. This matters: if we let current_date()
+    # be evaluated independently on the read and the write, a run that
+    # straddles midnight UTC would build rows for one day but assert a
+    # replaceWhere bound for another, and Delta would reject the write with
+    # "data written does not conform to replaceWhere". One literal removes
+    # the race entirely.
+    window_days = int(_arg("recompute_window_days", "2"))
+    today = dt.datetime.now(dt.timezone.utc).date()
+    as_of = today - dt.timedelta(days=window_days - 1)
+    as_of_str = as_of.isoformat()
+    replace_predicate = f"day >= DATE'{as_of_str}'"
+    print(f"gold.window as_of={as_of_str} today={today} days={window_days}")
+
     silver = spark.table(silver_table)
 
-    # Restrict to current + previous day. Anything older is considered
-    # finalized and is not recomputed.
-    cutoff_lower = F.date_sub(F.current_date(), 1)
-    bounded = silver.filter(F.to_date("observed_at") >= cutoff_lower)
-    bounded = bounded.withColumn("day", F.to_date("observed_at"))
-
-    # -- Rating drift -----------------------------------------------------
-    rating_drift = (
-        bounded
-        .groupBy("day", "business_id", "name", "city")
-        .agg(
-            F.avg("rating").alias("rating_avg"),
-            F.min("rating").alias("rating_min"),
-            F.max("rating").alias("rating_max"),
-            F.max("review_count").alias("review_count_max"),
-            F.count(F.lit(1)).cast("int").alias("observations"),
-        )
+    # Restrict to the recompute window. Anything older is considered finalized
+    # and is not touched, so historical analytics hit a stable surface.
+    bounded = (
+        silver
+        .withColumn("day", F.to_date("observed_at"))
+        .filter(F.col("day") >= F.lit(as_of_str).cast("date"))
+        # Reused by both aggregations below; cache to avoid re-scanning Silver.
+        .cache()
     )
 
-    (
-        rating_drift.write
-        .format("delta")
-        .mode("overwrite")
-        # Replace only the partitions we recomputed.
-        .option(
-            "replaceWhere",
-            f"day >= date_sub(current_date(), 1)",
-        )
-        .saveAsTable(rating_drift_table)
-    )
+    try:
+        # -- Rating drift -------------------------------------------------
+        rating_drift = (
+            bounded
+            .groupBy("day", "business_id", "name", "city")
+            .agg(
+                F.avg("rating").alias("rating_avg"),
+                F.min("rating").alias("rating_min"),
+                F.max("rating").alias("rating_max"),
+                F.max("review_count").alias("review_count_max"),
+                F.count(F.lit(1)).cast("int").alias("observations"),
+            )
+        ).cache()
 
-    # -- Category trends --------------------------------------------------
-    exploded = bounded.withColumn("category", F.explode_outer("categories"))
-    category_trends = (
-        exploded
-        .filter(F.col("category").isNotNull())
-        .groupBy("day", "category", "city")
-        .agg(
-            F.count(F.lit(1)).cast("long").alias("total_observations"),
-            F.countDistinct("business_id").cast("long").alias("distinct_businesses"),
-            F.avg("rating").alias("avg_rating"),
+        (
+            rating_drift.write
+            .format("delta")
+            .mode("overwrite")
+            .option("replaceWhere", replace_predicate)
+            .saveAsTable(rating_drift_table)
         )
-    )
-    (
-        category_trends.write
-        .format("delta")
-        .mode("overwrite")
-        .option(
-            "replaceWhere",
-            f"day >= date_sub(current_date(), 1)",
-        )
-        .saveAsTable(category_trends_table)
-    )
 
-    rd = rating_drift.count()
-    ct = category_trends.count()
-    print(f"gold.done rating_drift_rows={rd} category_trends_rows={ct}")
+        # -- Category trends ----------------------------------------------
+        category_trends = (
+            bounded
+            .withColumn("category", F.explode_outer("categories"))
+            .filter(F.col("category").isNotNull())
+            .groupBy("day", "category", "city")
+            .agg(
+                F.count(F.lit(1)).cast("long").alias("total_observations"),
+                F.countDistinct("business_id").cast("long").alias("distinct_businesses"),
+                F.avg("rating").alias("avg_rating"),
+            )
+        ).cache()
+
+        (
+            category_trends.write
+            .format("delta")
+            .mode("overwrite")
+            .option("replaceWhere", replace_predicate)
+            .saveAsTable(category_trends_table)
+        )
+
+        # Counts read from cache, not a fresh scan of Silver.
+        print(
+            f"gold.done rating_drift_rows={rating_drift.count()} "
+            f"category_trends_rows={category_trends.count()}"
+        )
+    finally:
+        bounded.unpersist()
 
 
 if __name__ == "__main__":
