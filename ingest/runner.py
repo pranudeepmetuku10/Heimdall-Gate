@@ -18,8 +18,8 @@ import datetime as dt
 import logging
 import signal
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Iterable
 
 from config.settings import Settings
 from ingest.producer import EventProducer
@@ -96,7 +96,7 @@ class Runner:
         terms: Iterable[str] | None = None,
         max_pages_per_city: int | None = None,
     ) -> SweepStats:
-        stats = SweepStats(started_at=dt.datetime.now(dt.timezone.utc))
+        stats = SweepStats(started_at=dt.datetime.now(dt.UTC))
         s = self._settings
         cities = list(cities) if cities is not None else list(s.cities)
         terms = list(terms) if terms is not None else list(s.terms)
@@ -129,14 +129,14 @@ class Runner:
                     msg = f"city={city!r} term={term!r} status={exc.status}"
                     log.error("sweep.api_error %s", msg)
                     stats.errors.append(msg)
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     msg = f"city={city!r} term={term!r} err={exc!r}"
                     log.exception("sweep.unexpected_error %s", msg)
                     stats.errors.append(msg)
 
         # Block until pending records are durably delivered.
         self._producer.flush()
-        stats.finished_at = dt.datetime.now(dt.timezone.utc)
+        stats.finished_at = dt.datetime.now(dt.UTC)
 
         log.info("sweep.done %s", stats.as_dict())
         return stats
@@ -183,18 +183,18 @@ class Runner:
                 last_page = page
 
             stats.businesses_seen += 1
-            fetched_at = dt.datetime.now(dt.timezone.utc)
+            fetched_at = dt.datetime.now(dt.UTC)
             try:
                 event = BusinessEvent.from_yelp(
                     biz, search_term=term, search_location=city
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 # Coercion failed - treat as a pre-validation failure and DLQ.
                 log.warning(
                     "normalize.failed business_id=%s err=%r",
                     biz.get("id"), exc,
                 )
-                self._producer._publish_dlq(  # noqa: SLF001 (intentional)
+                self._producer._publish_dlq(
                     payload=biz,
                     failures=[],
                     fetched_at=fetched_at,

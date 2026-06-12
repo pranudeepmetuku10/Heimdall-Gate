@@ -3,8 +3,8 @@ from __future__ import annotations
 import httpx
 import respx
 
-from ingest.runner import Runner
 from ingest.producer import EventProducer
+from ingest.runner import Runner
 from ingest.yelp_client import YelpClient
 
 

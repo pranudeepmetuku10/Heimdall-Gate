@@ -26,7 +26,8 @@ import logging
 import os
 import pathlib
 import threading
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import orjson
 from confluent_kafka import KafkaError, KafkaException, Producer
@@ -75,7 +76,7 @@ class EventProducer:
         settings: Settings,
         *,
         producer_factory: Callable[[dict[str, Any]], Producer] = Producer,
-        clock: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.timezone.utc),
+        clock: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     ) -> None:
         self._settings = settings
         self._clock = clock
@@ -84,14 +85,14 @@ class EventProducer:
         self._lock = threading.Lock()
 
         if settings.kafka_enabled:
-            self._producer: Optional[Producer] = producer_factory(
+            self._producer: Producer | None = producer_factory(
                 _build_producer_config(settings)
             )
         else:
             self._producer = None
             log.warning("kafka.disabled bootstrap_servers is empty; running file-sink only")
 
-        self._file_sink: Optional[pathlib.Path] = None
+        self._file_sink: pathlib.Path | None = None
         if settings.file_sink_enabled:
             sink = pathlib.Path(settings.file_sink_path)
             sink.mkdir(parents=True, exist_ok=True)
@@ -242,7 +243,7 @@ class EventProducer:
             "producer_id": self._settings.producer_id,
             "reason": reason,
             "failures": [f.as_dict() for f in failures],
-            "observed_at": fetched_at.astimezone(dt.timezone.utc).isoformat(),
+            "observed_at": fetched_at.astimezone(dt.UTC).isoformat(),
             "payload": payload,
         }
         key = payload.get("business_id") or "unknown"

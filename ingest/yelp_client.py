@@ -19,15 +19,16 @@ Behavior worth knowing:
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterator
+from collections.abc import Iterator
+from typing import Any
 
 import httpx
 from tenacity import (
+    before_sleep_log,
     retry,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
-    before_sleep_log,
 )
 
 log = logging.getLogger(__name__)
@@ -87,7 +88,7 @@ class YelpClient:
     def close(self) -> None:
         self._client.close()
 
-    def __enter__(self) -> "YelpClient":
+    def __enter__(self) -> YelpClient:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -149,8 +150,7 @@ class YelpClient:
             businesses = body.get("businesses") or []
             if not businesses:
                 return
-            for biz in businesses:
-                yield biz
+            yield from businesses
             if len(businesses) < page_size:
                 return
 

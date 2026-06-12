@@ -90,4 +90,4 @@ def yelp_search_body() -> dict[str, Any]:
 
 @pytest.fixture
 def fixed_clock() -> dt.datetime:
-    return dt.datetime(2026, 6, 9, 12, 0, 0, tzinfo=dt.timezone.utc)
+    return dt.datetime(2026, 6, 9, 12, 0, 0, tzinfo=dt.UTC)

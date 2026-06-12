@@ -15,9 +15,9 @@ visible during code review.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
-
+from typing import Any
 
 # --- Sentinel set of "obviously bogus" rating values -------------------------
 # Yelp ratings are 1.0..5.0 in 0.5 increments. Anything outside this set is a

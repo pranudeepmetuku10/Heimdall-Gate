@@ -71,8 +71,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.inject_bad:
             log.info("inject_bad.start")
-            runner._producer.inject_bad_for_test()  # noqa: SLF001
-            runner._producer.flush()                # noqa: SLF001
+            runner._producer.inject_bad_for_test()
+            runner._producer.flush()
             log.info("inject_bad.done")
             return 0
 
@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             runner.run_forever()
         return 0
-    except Exception:  # noqa: BLE001
+    except Exception:
         log.exception("ingest.fatal")
         return 1
     finally:

@@ -74,4 +74,4 @@ def test_envelope_observed_at_coerces_naive_to_utc():
         search_location="Boston",
     )
     env = Envelope(producer_id="p", observed_at=naive, payload=event)
-    assert env.observed_at.tzinfo is dt.timezone.utc
+    assert env.observed_at.tzinfo is dt.UTC

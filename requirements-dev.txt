@@ -1,6 +1,7 @@
 -r requirements.txt
 
-pytest==8.3.3
-pytest-mock==3.14.0
-respx==0.21.1
-ruff==0.6.9
+# respx 0.22 tracks httpx 0.28; keep these two in lockstep on upgrade.
+pytest==8.4.2
+pytest-mock==3.15.1
+respx==0.22.0
+ruff==0.8.6

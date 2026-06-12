@@ -23,4 +23,6 @@ ignore = [
     "E501",   # line length, ruff format handles it
     "BLE001", # we deliberately catch broad exceptions in sweep loop
     "SLF001", # __main__ pokes into producer internals; documented
+    "UP038",  # isinstance(x, (a, b)) is faster than the X|Y form in the
+              # per-record validation hot path; rule is deprecated upstream
 ]

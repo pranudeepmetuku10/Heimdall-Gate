@@ -24,7 +24,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
 SCHEMA_VERSION = 1
 
 
@@ -78,7 +77,7 @@ class BusinessEvent(BaseModel):
         *,
         search_term: str,
         search_location: str,
-    ) -> "BusinessEvent":
+    ) -> BusinessEvent:
         """Build a BusinessEvent from a Yelp `/businesses/search` element.
 
         Yelp's category objects look like `{"alias": "...", "title": "..."}`.
@@ -124,8 +123,8 @@ class Envelope(BaseModel):
     @classmethod
     def _ensure_utc(cls, v: dt.datetime) -> dt.datetime:
         if v.tzinfo is None:
-            return v.replace(tzinfo=dt.timezone.utc)
-        return v.astimezone(dt.timezone.utc)
+            return v.replace(tzinfo=dt.UTC)
+        return v.astimezone(dt.UTC)
 
     def kafka_key(self) -> str:
         """Partition key. Co-locates events for the same business on one
