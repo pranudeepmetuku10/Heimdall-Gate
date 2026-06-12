@@ -11,6 +11,16 @@ deltas, and category trends across cities.
 This is a personal engineering project. It is not affiliated with Yelp or
 Databricks.
 
+**Documentation**
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — the technical reference: component
+  contracts, table schemas, processing semantics, and delivery guarantees.
+- [docs/architecture.html](docs/architecture.html) — a self-contained visual
+  walkthrough of the flow, the medallion, and the technology at each layer.
+  Open it in a browser; no build step or network access required.
+- [DATABRICKS_SETUP.md](DATABRICKS_SETUP.md) — step-by-step Databricks Free
+  Edition setup for a working demo.
+
 ---
 
 ## Architecture
@@ -91,12 +101,16 @@ heimdall-gate/
   validation/             shared validation rules used by ingest + spark
   databricks/jobs/        Spark Structured Streaming jobs (run as Databricks jobs)
   databricks/notebooks/   Exploratory notebooks
+  docs/architecture.html  self-contained visual architecture walkthrough
   scripts/                local helpers (topic bootstrap, smoke test)
   tests/                  pytest unit tests
   docker-compose.yml      local Kafka (KRaft mode, single broker)
   Makefile                common entrypoints
-  requirements.txt        Python deps
+  pyproject.toml          pytest + ruff configuration
+  requirements.txt        Python deps (pinned to wheels for CPython 3.11-3.13)
+  requirements-dev.txt    test/lint deps
   .env.example            documented environment variables
+  ARCHITECTURE.md         technical reference (contracts, schemas, guarantees)
   DATABRICKS_SETUP.md     step-by-step Databricks Free Edition setup
 ```
 
@@ -136,6 +150,19 @@ make consume
 
 For Databricks: see [DATABRICKS_SETUP.md](DATABRICKS_SETUP.md).
 
+### Development
+
+```bash
+make install-dev   # venv + runtime + test/lint deps
+make test          # pytest (no Kafka or network required)
+make lint          # ruff
+```
+
+The unit tests stub the Yelp API with `respx` and run the producer in
+file-sink mode, so they need neither a live API key nor a running broker. The
+pinned dependency set installs from prebuilt wheels on CPython 3.11-3.13
+(`confluent-kafka` bundles `librdkafka`, so no system C library is required).
+
 ---
 
 ## Configuration
@@ -151,12 +178,12 @@ The notable ones:
 | `HEIMDALL_POLL_INTERVAL_SEC` | `900` | Seconds between full sweeps |
 | `HEIMDALL_PAGE_SIZE` | `50` | Yelp page size (max 50) |
 | `HEIMDALL_MAX_PAGES_PER_CITY` | `4` | Cap on pages per city per sweep |
-| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9092` | Kafka brokers |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9094` | Kafka brokers (9094 is the local external listener) |
 | `KAFKA_TOPIC_RAW` | `heimdall.raw.business` | Raw events topic |
 | `KAFKA_TOPIC_DLQ` | `heimdall.dlq.ingest` | Producer-side DLQ |
 | `KAFKA_SECURITY_PROTOCOL` | `PLAINTEXT` | Set to `SASL_SSL` for Confluent Cloud |
 | `HEIMDALL_LOG_LEVEL` | `INFO` | Standard Python log levels |
-| `HEIMDALL_LOG_FORMAT` | `json` | `json` or `console` |
+| `HEIMDALL_LOG_FORMAT` | `console` | `json` or `console` |
 
 ---
 
