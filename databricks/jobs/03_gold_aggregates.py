@@ -66,19 +66,29 @@ def main() -> None:
     )
 
     try:
-        # -- Rating drift -------------------------------------------------
+        # An empty window means "no new observations", not "delete the recent
+        # partitions". replaceWhere + overwrite with zero rows would wipe every
+        # partition matching the predicate, so short-circuit instead.
+        if bounded.isEmpty():
+            print(f"gold.skip empty window as_of={as_of_str}; partitions preserved")
+            return
+
+        # -- Rating drift, grain (day, business_id) -----------------------
+        # name and city are mutable free-text attributes; keep the latest
+        # observed value so the grain stays (day, business_id) as documented.
         rating_drift = (
             bounded
-            .groupBy("day", "business_id", "name", "city")
+            .groupBy("day", "business_id")
             .agg(
+                F.max_by("name", "observed_at").alias("name"),
+                F.max_by("city", "observed_at").alias("city"),
                 F.avg("rating").alias("rating_avg"),
                 F.min("rating").alias("rating_min"),
                 F.max("rating").alias("rating_max"),
                 F.max("review_count").alias("review_count_max"),
                 F.count(F.lit(1)).cast("int").alias("observations"),
             )
-        ).cache()
-
+        )
         (
             rating_drift.write
             .format("delta")
@@ -87,7 +97,7 @@ def main() -> None:
             .saveAsTable(rating_drift_table)
         )
 
-        # -- Category trends ----------------------------------------------
+        # -- Category trends, grain (day, category, city) -----------------
         category_trends = (
             bounded
             .withColumn("category", F.explode_outer("categories"))
@@ -98,8 +108,7 @@ def main() -> None:
                 F.countDistinct("business_id").cast("long").alias("distinct_businesses"),
                 F.avg("rating").alias("avg_rating"),
             )
-        ).cache()
-
+        )
         (
             category_trends.write
             .format("delta")
@@ -108,11 +117,8 @@ def main() -> None:
             .saveAsTable(category_trends_table)
         )
 
-        # Counts read from cache, not a fresh scan of Silver.
-        print(
-            f"gold.done rating_drift_rows={rating_drift.count()} "
-            f"category_trends_rows={category_trends.count()}"
-        )
+        print(f"gold.done rating_drift_rows={rating_drift.count()} "
+              f"category_trends_rows={category_trends.count()}")
     finally:
         bounded.unpersist()
 
