@@ -46,6 +46,13 @@ def _secret(scope: str, key: str) -> str:
 def main() -> None:
     spark = SparkSession.builder.getOrCreate()
 
+    # PLAIN SASL requires the cleartext password inside the JAAS string, so it
+    # is passed as a readStream option below. Mask it (and any other secret) in
+    # query plans, the Spark UI, and StreamingQueryProgress JSON.
+    spark.conf.set(
+        "spark.sql.redaction.options.regex", "(?i)secret|password|token|jaas"
+    )
+
     source_type = _arg("source_type", "kafka").lower()
     bronze_table = _arg("bronze_table", "heimdall.bronze.business_events_raw")
     checkpoint = _arg(
@@ -75,7 +82,11 @@ def main() -> None:
             .option("kafka.bootstrap.servers", bootstrap)
             .option("subscribe", topic)
             .option("startingOffsets", "earliest")
-            .option("failOnDataLoss", "false")
+            # Fail loudly if the checkpoint expects offsets that Kafka
+            # retention has already dropped, rather than silently skipping
+            # them. Keep Kafka retention comfortably longer than the job's
+            # schedule interval (see DATABRICKS_SETUP.md).
+            .option("failOnDataLoss", "true")
             .option("kafka.security.protocol", "SASL_SSL")
             .option("kafka.sasl.mechanism", "PLAIN")
             .option("kafka.sasl.jaas.config", jaas)
