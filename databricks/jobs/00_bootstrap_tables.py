@@ -44,8 +44,13 @@ spark.sql(
 )
 
 # -- Silver ---------------------------------------------------------------
-# Validated, typed, MERGEd by (business_id, observed_at). Idempotent under
-# at-least-once delivery.
+# Validated, typed observation time series. One row per source event; the
+# Silver job MERGEs on event_id so reprocessing Bronze is idempotent.
+#
+# Not physically partitioned. city was rejected as a partition column: it is
+# unbounded free text from the source and the MERGE key (event_id) cannot
+# prune it, so it only produced small files. Cluster on read-hot columns
+# instead (Z-ORDER / Liquid Clustering) once volume justifies it.
 spark.sql(
     f"""
     CREATE TABLE IF NOT EXISTS {CATALOG}.silver.business_events (
@@ -72,7 +77,6 @@ spark.sql(
         schema_version    INT
     )
     USING DELTA
-    PARTITIONED BY (city)
     TBLPROPERTIES (
         'delta.autoOptimize.optimizeWrite' = 'true',
         'delta.autoOptimize.autoCompact'   = 'true'
@@ -81,13 +85,17 @@ spark.sql(
 )
 
 # -- DLQ ------------------------------------------------------------------
-# Where Silver sends records that fail validation. Stores enough to debug
-# upstream without re-fetching from the API.
+# Quarantine for records that fail to parse or fail validation. dlq_key is a
+# content hash (topic, partition, offset, envelope) used as the MERGE key so a
+# retried micro-batch cannot double-count the data-quality metric. Stores the
+# original payload so a bad record can be diagnosed without re-fetching.
 spark.sql(
     f"""
     CREATE TABLE IF NOT EXISTS {CATALOG}.dlq.business (
+        dlq_key          STRING NOT NULL,
         ingest_ts        TIMESTAMP,
         kafka_topic      STRING,
+        kafka_partition  INT,
         kafka_offset     BIGINT,
         kafka_key        STRING,
         failure_reason   STRING,
@@ -100,9 +108,10 @@ spark.sql(
 )
 
 # -- Gold: rating drift ---------------------------------------------------
-# One row per (business_id, day). Captures daily rating min/avg/max and
-# observation count. Daily partitions are overwritten by the gold job for the
-# current and previous calendar day so late-arriving events are reflected.
+# Grain: one row per (day, business_id). Daily rating min/avg/max and
+# observation count. The gold job overwrites only the recompute-window
+# partitions (replaceWhere) so late-arriving events are reflected without
+# rewriting history.
 spark.sql(
     f"""
     CREATE TABLE IF NOT EXISTS {CATALOG}.gold.rating_drift_daily (

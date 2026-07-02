@@ -36,7 +36,7 @@ Databricks.
                   |  ingest.runner       |   Python service
                   |  - poll loop         |   confluent-kafka producer
                   |  - normalize         |   pydantic schemas
-                  |  - sign envelope     |
+                  |  - build envelope    |
                   +----------+-----------+
                              |
                              | Kafka (idempotent producer)
@@ -80,12 +80,13 @@ The pipeline is intentionally split at two boundaries:
   Buffering raw responses in Kafka decouples the pull cadence from downstream
   processing and lets us replay history without re-hitting the API.
 - **Bronze / Silver / Gold.** Bronze is an append-only landing zone with the
-  exact envelope we received. Silver is the validated, typed, deduplicated form.
-  Gold is the analytical surface. Each hop is idempotent.
+  exact envelope we received. Silver is the validated, typed observation stream
+  (one row per source event; the MERGE on `event_id` makes reprocessing
+  idempotent). Gold is the analytical surface. Each hop is idempotent.
 - **Available-now triggering.** Databricks Free Edition runs on serverless
   compute that is not designed for continuous 24/7 streaming jobs. We use
   `trigger(availableNow=True)` so each run drains whatever is in Kafka and exits.
-  A scheduled Databricks job re-fires the notebook every N minutes.
+  A scheduled Databricks job re-fires it every N minutes.
 - **Quarantine over reject.** Records that fail schema or business validation are
   routed to a `dlq` Delta table with the failure reason and the original payload.
   Nothing is silently dropped.
@@ -95,7 +96,7 @@ The pipeline is intentionally split at two boundaries:
 ## Repository layout
 
 ```
-heimdall-gate/
+Heimdall-Gate/
   config/                 runtime config (env-driven) and logging
   ingest/                 Python service: API client, producer, runner
   validation/             shared validation rules used by ingest + spark
@@ -123,7 +124,7 @@ Prerequisites: Docker, Python 3.11+, a Yelp Fusion API key
 
 ```bash
 # 1. Clone and enter
-cd heimdall-gate
+cd Heimdall-Gate
 
 # 2. Configure
 cp .env.example .env
@@ -178,6 +179,7 @@ The notable ones:
 | `HEIMDALL_POLL_INTERVAL_SEC` | `900` | Seconds between full sweeps |
 | `HEIMDALL_PAGE_SIZE` | `50` | Yelp page size (max 50) |
 | `HEIMDALL_MAX_PAGES_PER_CITY` | `4` | Cap on pages per city per sweep |
+| `HEIMDALL_API_CALL_BUDGET` | `2000` | Hard ceiling on Yelp API calls per process; quota guard for the 5,000/day free tier |
 | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:9094` | Kafka brokers (9094 is the local external listener) |
 | `KAFKA_TOPIC_RAW` | `heimdall.raw.business` | Raw events topic |
 | `KAFKA_TOPIC_DLQ` | `heimdall.dlq.ingest` | Producer-side DLQ |
@@ -204,7 +206,8 @@ you have two practical options, documented in `DATABRICKS_SETUP.md`:
    and the SASL credentials in `.env`.
 2. Run the file-sink mode of the producer, which mirrors every Kafka message to
    newline-delimited JSON in a directory that you upload to a Unity Catalog
-   volume. The bronze job has a `--source-type=volume` variant for this case.
+   volume. The bronze job accepts a `source_type=volume` job parameter for this
+   case.
 
 The recommended path is (1) with Confluent Cloud's free tier. (2) is documented
 for users who want a fully offline demo.
@@ -220,10 +223,14 @@ job that prunes rows older than 24h, or swap the source to an unrestricted feed
 (OpenStreetMap Overpass, OpenAQ, GDELT, etc.).
 
 **No exactly-once guarantee end-to-end.** The producer is idempotent within a
-Kafka session, and the Spark sink uses checkpointed offsets, so the path is
-effectively at-least-once with idempotent upserts in Silver (MERGE on
-`business_id` + `observed_at`). Duplicates that survive the MERGE are rare but
-possible if the producer is restarted mid-flight.
+Kafka session, and the Spark sink uses checkpointed offsets, so the wire path is
+at-least-once. Silver MERGEs on the envelope's `event_id` (minted once by the
+producer and frozen in Bronze), so reprocessing the same Bronze offsets updates
+rows in place instead of inserting duplicates — the table state is
+effectively-once. Note that a later re-fetch of the same business is a *new*
+observation with a new `event_id`, not a duplicate; that is intended and is what
+powers rating-drift analysis. Silver is a time series, not a current-state
+table.
 
 **Schema evolution.** The Bronze table stores the raw envelope as a `STRING`
 column and decodes lazily in Silver. This lets us survive Yelp adding fields

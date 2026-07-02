@@ -88,6 +88,20 @@ def test_inject_bad_writes_dlq_record(producer, settings):
     assert any(r.get("reason") == "injected_for_test" for r in rows)
 
 
+def test_inject_bad_raw_publishes_full_envelope(producer, settings):
+    # Unlike inject_bad_for_test (a DLQ record), inject_bad_raw publishes a full
+    # envelope to the raw topic so Silver, not the producer, quarantines it.
+    producer.inject_bad_raw()
+    producer.flush()
+    rows = _read_sink(settings)
+    assert len(rows) == 1
+    env = rows[0]
+    assert "payload" in env and "reason" not in env
+    assert env["payload"]["business_id"] == "demo-quarantine-0001"
+    assert env["payload"]["rating"] == 9.9
+    assert env["payload"]["review_count"] == -1
+
+
 def test_partition_key_is_business_id(producer, settings, fixed_clock):
     producer.publish_business(_good_business(), fetched_at=fixed_clock)
     rows = _read_sink(settings)

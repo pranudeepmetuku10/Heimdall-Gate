@@ -38,6 +38,9 @@ class SweepStats:
     businesses_seen: int = 0
     accepted: int = 0
     rejected: int = 0
+    # Records the broker did not acknowledge before delivery.timeout.ms.
+    # Not re-enqueued at the app layer, so a non-zero value is a real loss.
+    delivery_failed: int = 0
     errors: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
@@ -49,6 +52,7 @@ class SweepStats:
             "businesses_seen": self.businesses_seen,
             "accepted": self.accepted,
             "rejected": self.rejected,
+            "delivery_failed": self.delivery_failed,
             "errors": self.errors,
         }
 
@@ -86,6 +90,17 @@ class Runner:
             self._producer.close()
         finally:
             self._client.close()
+
+    def inject_bad_local(self) -> None:
+        """Publish one invalid record to the producer-side Kafka DLQ topic."""
+        self._producer.inject_bad_for_test()
+        self._producer.flush()
+
+    def inject_bad_raw(self) -> None:
+        """Publish one malformed envelope to the raw topic so the Databricks
+        Silver job quarantines it into the Delta DLQ table."""
+        self._producer.inject_bad_raw()
+        self._producer.flush()
 
     # ----- driving ----------------------------------------------------------
 
@@ -136,8 +151,14 @@ class Runner:
 
         # Block until pending records are durably delivered.
         self._producer.flush()
+        stats.delivery_failed = self._producer.failed
         stats.finished_at = dt.datetime.now(dt.UTC)
 
+        if stats.delivery_failed:
+            log.error(
+                "sweep.delivery_failures count=%d (records not re-enqueued)",
+                stats.delivery_failed,
+            )
         log.info("sweep.done %s", stats.as_dict())
         return stats
 
@@ -194,11 +215,8 @@ class Runner:
                     "normalize.failed business_id=%s err=%r",
                     biz.get("id"), exc,
                 )
-                self._producer._publish_dlq(
-                    payload=biz,
-                    failures=[],
-                    fetched_at=fetched_at,
-                    reason="normalize_failed",
+                self._producer.quarantine(
+                    biz, fetched_at=fetched_at, reason="normalize_failed"
                 )
                 stats.rejected += 1
                 continue

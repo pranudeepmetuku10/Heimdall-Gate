@@ -80,8 +80,8 @@ def main() -> None:
             bounded
             .groupBy("day", "business_id")
             .agg(
-                F.max_by("name", "observed_at").alias("name"),
-                F.max_by("city", "observed_at").alias("city"),
+                F.expr("max_by(name, observed_at)").alias("name"),
+                F.expr("max_by(city, observed_at)").alias("city"),
                 F.avg("rating").alias("rating_avg"),
                 F.min("rating").alias("rating_min"),
                 F.max("rating").alias("rating_max"),

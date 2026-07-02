@@ -58,10 +58,9 @@ def _build_producer_config(settings: Settings) -> dict[str, Any]:
         "delivery.timeout.ms": 30_000,
         "retries": 10,
     }
-    if settings.kafka_security_protocol in ("SSL", "SASL_SSL"):
+    if settings.kafka_security_protocol != "PLAINTEXT":
         cfg["security.protocol"] = settings.kafka_security_protocol
-    if settings.kafka_security_protocol in ("SASL_PLAINTEXT", "SASL_SSL"):
-        cfg["security.protocol"] = settings.kafka_security_protocol
+    if settings.kafka_security_protocol.startswith("SASL_"):
         cfg["sasl.mechanism"] = settings.kafka_sasl_mechanism
         cfg["sasl.username"] = settings.kafka_sasl_username
         cfg["sasl.password"] = settings.kafka_sasl_password
@@ -151,25 +150,68 @@ class EventProducer:
         )
         return True
 
-    def inject_bad_for_test(self) -> None:
-        """Force a DLQ-bound record. Used by the smoke test."""
+    def quarantine(
+        self,
+        payload: dict[str, Any],
+        *,
+        fetched_at: dt.datetime,
+        reason: str,
+        failures: list[ValidationFailure] | None = None,
+    ) -> None:
+        """Route a record to the producer-side DLQ topic.
+
+        Used for payloads that cannot even be normalized into a BusinessEvent.
+        """
         self._publish_dlq(
-            payload={
-                "business_id": "",
-                "name": "",
-                "rating": 99,
-                "review_count": -1,
-            },
-            failures=validate_business_event(
-                {
-                    "business_id": "",
-                    "name": "",
-                    "rating": 99,
-                    "review_count": -1,
-                }
-            ),
+            payload=payload,
+            failures=failures or [],
+            fetched_at=fetched_at,
+            reason=reason,
+        )
+
+    def inject_bad_for_test(self) -> None:
+        """Publish an invalid record to the producer-side DLQ topic
+        (``heimdall.dlq.ingest``). This is the LOCAL data-quality path and is
+        independent of the Databricks Delta DLQ table. Used by the smoke test.
+        """
+        bad = {"business_id": "", "name": "", "rating": 99, "review_count": -1}
+        self._publish_dlq(
+            payload=bad,
+            failures=validate_business_event(bad),
             fetched_at=self._clock(),
             reason="injected_for_test",
+        )
+
+    def inject_bad_raw(self) -> None:
+        """Publish a structurally-valid but business-invalid envelope to the
+        RAW topic (``heimdall.raw.business``), bypassing pre-publish validation.
+
+        Unlike ``inject_bad_for_test``, this record flows through Bronze and is
+        quarantined by the Silver job into the Delta ``dlq.business`` table, so
+        it is the right way to demonstrate the Databricks quarantine path.
+        """
+        bad = BusinessEvent(
+            business_id="demo-quarantine-0001",
+            name="Heimdall Quarantine Demo",
+            rating=9.9,          # out of 1.0..5.0 -> rating_out_of_range
+            review_count=-1,     # negative       -> negative_review_count
+            categories=["restaurants"],
+            coordinates={"latitude": 42.3601, "longitude": -71.0589},
+            location={"city": "Boston", "state": "MA", "country": "US"},
+            search_term="restaurants",
+            search_location="Boston",
+        )
+        now = self._clock()
+        envelope = Envelope(
+            producer_id=self._settings.producer_id,
+            observed_at=now,
+            payload=bad,
+        )
+        log.warning("inject_bad_raw publishing malformed envelope to raw topic")
+        self._publish_raw(
+            topic=self._settings.kafka_topic_raw,
+            key=envelope.kafka_key(),
+            value=envelope.model_dump(mode="json"),
         )
 
     def flush(self, timeout: float = 15.0) -> int:

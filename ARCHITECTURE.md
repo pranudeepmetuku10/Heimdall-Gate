@@ -18,7 +18,7 @@ source of truth.
 | Stage | Component | Responsibility | Does NOT do |
 |-------|-----------|----------------|-------------|
 | Source | Yelp Fusion API | System of record for business listings | — |
-| Ingest | `ingest/` Python service | Transport: poll, page, retry, normalize, sign envelope, publish | No analytics, no state |
+| Ingest | `ingest/` Python service | Transport: poll, page, retry, normalize, build envelope, publish | No analytics, no state |
 | Transport | Kafka topic `heimdall.raw.business` | Durable buffer, replay log, decoupling point | No transformation |
 | Land | `01_bronze_ingest` | Append raw envelopes verbatim to Delta | No parsing, no validation |
 | Conform | `02_silver_transform` | Parse, validate, dedup, MERGE valid / quarantine bad | No aggregation |
@@ -94,8 +94,10 @@ Contract rules that the rest of the system relies on:
 - **`business_id` is the Kafka partition key.** All events for one business land
   on the same partition, so per-business ordering is preserved through the log.
 - **`observed_at` is producer wall-clock at fetch time, always UTC.** It is the
-  event-time used for dedup and for Gold's daily bucketing — never processing
-  time.
+  observation timestamp that Gold buckets by day — never processing time. It is
+  *not* a dedup key (each fetch mints a fresh value by design); see §5.
+- **`event_id` is a per-envelope UUID, stable through Bronze.** It is Silver's
+  MERGE key, so reprocessing the same Bronze rows is idempotent.
 - **`schema_version` is explicit.** A breaking change bumps it; consumers can
   branch on it during a migration window instead of guessing.
 - **`ingest_lag_ms`** is fetch-to-publish latency, carried for observability so
@@ -125,15 +127,20 @@ Append-only landing zone. Partitioned by `kafka_topic`. One row per Kafka messag
 | `raw_envelope` | STRING | Verbatim JSON envelope |
 
 ### Silver — `heimdall.silver.business_events`
-Validated, typed, deduplicated. Partitioned by `city`. One row per
-`(business_id, observed_at)` — the natural key.
+Validated, typed observation time series: one row per source event, MERGEd on
+`event_id`. Not physically partitioned — `city` was rejected as a partition
+column (unbounded free text, and the `event_id` MERGE key cannot prune it, so it
+only produced small files); cluster on read-hot columns once volume justifies
+it.
 
 Typed columns: `business_id, name, rating, review_count, price, is_closed, url,
 categories, latitude, longitude, city, state, country, zip_code, search_term,
 search_location, observed_at, ingest_ts, event_id, producer_id, schema_version`.
 
 ### DLQ — `heimdall.dlq.business`
-Quarantine. Partitioned by `failure_reason`. Carries `failure_codes
+Quarantine. Partitioned by `failure_reason`. `dlq_key` is a content hash
+(`kafka_topic, kafka_partition, kafka_offset, raw_envelope`) used as the MERGE
+key so a retried micro-batch cannot double-count. Carries `failure_codes
 ARRAY<STRING>` and the original `raw_envelope` so a bad record can be diagnosed
 and replayed without re-hitting the API.
 
@@ -179,23 +186,26 @@ and the sink commit log. On restart a job resumes exactly where it left off;
 | Hop | Guarantee | Mechanism |
 |-----|-----------|-----------|
 | Producer → Kafka | At-least-once, no duplicates within a session | Idempotent producer (`enable.idempotence=true`, `acks=all`) |
-| Kafka → Bronze | Exactly-once append | Structured Streaming checkpoint + Delta atomic commit |
-| Bronze → Silver | Effectively-once at rest | MERGE on `(business_id, observed_at)` is idempotent; re-processing a row updates in place rather than duplicating |
-| Silver → Gold | Idempotent recompute | `replaceWhere` overwrites only the bounded day partitions |
+| Kafka → Bronze | Exactly-once for retained offsets | Structured Streaming checkpoint + Delta atomic commit; `failOnDataLoss=true` so a retention gap fails loudly rather than skipping |
+| Bronze → Silver | Effectively-once at rest | MERGE on `event_id` (frozen in Bronze) is a re-load guard: reprocessing updates in place instead of inserting |
+| Silver → Gold | Idempotent recompute | `replaceWhere` overwrites only the bounded day partitions; an empty window is a no-op, not a delete |
 
 The honest framing: the wire path is **at-least-once**, and the **idempotent
-MERGE** collapses any duplicates so the *table state* is effectively-once. We do
-not claim end-to-end exactly-once, because the producer can resend on restart;
-we claim the destination is correct regardless. That distinction is exactly what
-a skeptical audience will probe, so it is stated plainly.
+MERGE on `event_id`** makes the *table state* effectively-once under
+reprocessing. We do not claim end-to-end exactly-once. Note the boundary of the
+claim: a producer restart that re-fetches a business publishes a *new* event
+(new `event_id`, new `observed_at`), which is a legitimate new observation for a
+time series, not a duplicate to collapse. Silver is an observation stream, not a
+current-state table.
 
 ### Silver dedup detail
 
-Within a micro-batch the same `(business_id, observed_at)` can appear more than
-once (at-least-once delivery, producer retries). Silver applies a
-`row_number()` window keyed on the natural key, ordered by `ingest_ts` desc, and
-keeps the latest before the MERGE. So both *intra-batch* duplicates (window) and
-*cross-batch* duplicates (MERGE) are handled.
+The only duplicate Silver collapses is the *same envelope* appearing twice — an
+at-least-once redelivery into Bronze, or a checkpoint-reset reprocess. Those rows
+are byte-identical and share an `event_id`, so the MERGE updates in place. Within
+a micro-batch, a `row_number()` window partitioned by `event_id` (ordered by
+`ingest_ts` then `kafka_offset`, deterministic) keeps one row before the MERGE,
+because Delta rejects a MERGE whose source has two rows matching one target key.
 
 ### Gold recompute window
 
@@ -222,15 +232,22 @@ The PySpark version is a translation, not a second design — the Silver job
 header explicitly notes that a rule change in the Python module must be mirrored.
 Keeping the canonical list in one file makes any drift visible in code review.
 
-Rules cover: non-empty `business_id`/`name`/`city`, `rating` in 1.0–5.0 in 0.5
-steps, non-negative integer `review_count`, coordinates in valid lat/long
-ranges, and a non-empty `categories` list. Every failure carries a stable
+Because the producer applies the same rules before publishing, the Silver DLQ
+normally fills only on genuine cross-layer drift (defense in depth) or from a
+record injected straight onto the raw topic. Silver-side rules cover: a
+parseable envelope, non-null `event_id` and `observed_at` (the MERGE key and the
+Gold time bucket), non-empty `business_id`/`name`/`city`, `rating` in 1.0–5.0 in
+0.5 steps, non-negative integer `review_count`, coordinates in valid lat/long
+ranges, and a non-empty `categories` list. A row whose envelope will not parse
+is quarantined with reason `envelope_parse_failed` rather than dropped, so the
+"nothing is dropped" guarantee holds literally. Every failure carries a stable
 `code` (e.g. `rating_out_of_range`) so the DLQ is groupable:
 
 ```sql
-SELECT failure_reason, code, COUNT(*)
-FROM (SELECT failure_reason, explode(failure_codes) AS code FROM heimdall.dlq.business)
-GROUP BY 1, 2 ORDER BY 3 DESC;
+SELECT code, COUNT(*) AS n
+FROM heimdall.dlq.business
+LATERAL VIEW explode(failure_codes) t AS code
+GROUP BY code ORDER BY n DESC;
 ```
 
 That query is the operational pulse of data quality, and it is one of the demo

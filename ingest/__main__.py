@@ -35,8 +35,14 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument(
         "--inject-bad",
         action="store_true",
-        help="Publish a single intentionally invalid record to the DLQ topic "
-             "and exit. Used by the smoke test.",
+        help="Publish one invalid record to the producer-side Kafka DLQ topic "
+             "(heimdall.dlq.ingest) and exit. Used by the local smoke test.",
+    )
+    p.add_argument(
+        "--inject-bad-raw",
+        action="store_true",
+        help="Publish one malformed envelope to the raw topic so the Databricks "
+             "Silver job quarantines it into the Delta dlq.business table.",
     )
     p.add_argument(
         "--max-cities",
@@ -58,7 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
     configure_logging(settings.log_level, settings.log_format)
 
-    if not args.inject_bad:
+    # Injection modes do not call Yelp, so they do not require an API key.
+    if not (args.inject_bad or args.inject_bad_raw):
         try:
             settings.require_yelp_key()
         except RuntimeError as exc:
@@ -70,10 +77,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if args.inject_bad:
-            log.info("inject_bad.start")
-            runner._producer.inject_bad_for_test()
-            runner._producer.flush()
+            log.info("inject_bad.start target=producer_dlq")
+            runner.inject_bad_local()
             log.info("inject_bad.done")
+            return 0
+
+        if args.inject_bad_raw:
+            log.info("inject_bad_raw.start target=raw_topic")
+            runner.inject_bad_raw()
+            log.info("inject_bad_raw.done")
             return 0
 
         cities = (

@@ -256,7 +256,7 @@
           <text class="d-num" x="236" y="110" text-anchor="middle">2</text>
           <text class="d-box-title" x="254" y="111">Ingestion</text>
           <text class="d-box-sub" x="230" y="138">Poll · retry · page</text>
-          <text class="d-box-sub" x="230" y="155">normalize · sign</text>
+          <text class="d-box-sub" x="230" y="155">normalize · envelope</text>
           <text class="d-tag" x="230" y="172">PYTHON SERVICE</text>
         </g>
         <!-- 3 -->
@@ -383,9 +383,9 @@
           <text class="d-stage-name d-stage-silver" x="454" y="106">SILVER</text>
           <text class="d-table-name" x="454" y="126">silver.business_events</text>
           <text class="d-bullet" x="454" y="156">• from_json + validate rules</text>
-          <text class="d-bullet" x="454" y="180">• Dedup window per natural key</text>
-          <text class="d-bullet" x="454" y="204">• MERGE (business_id, observed_at)</text>
-          <text class="d-bullet" x="454" y="228">• Typed, partitioned by city</text>
+          <text class="d-bullet" x="454" y="180">• Parse / rule failures to DLQ</text>
+          <text class="d-bullet" x="454" y="204">• MERGE on event_id (reload guard)</text>
+          <text class="d-bullet" x="454" y="228">• Typed observation time series</text>
           <text class="d-tag" x="454" y="252">IDEMPOTENT UPSERT</text>
         </g>
 
@@ -527,7 +527,7 @@
   <span class="k">"source"</span>:          <span class="s">"yelp"</span>,
   <span class="k">"source_endpoint"</span>: <span class="s">"businesses/search"</span>,
   <span class="k">"schema_version"</span>:  1,                 <span class="c">// explicit; consumers branch on it</span>
-  <span class="k">"observed_at"</span>:     <span class="s">"2026-06-09T12:00:00.000+00:00"</span>,  <span class="c">// event-time, UTC</span>
+  <span class="k">"observed_at"</span>:     <span class="s">"2026-06-09T12:00:00.000+00:00"</span>,  <span class="c">// observation time, UTC (Gold buckets by day)</span>
   <span class="k">"ingest_lag_ms"</span>:   142,               <span class="c">// fetch→publish latency (observability)</span>
   <span class="k">"payload"</span>: {
     <span class="k">"business_id"</span>:  <span class="s">"WavvLdfdP6g8aZTtbBQHTw"</span>,
@@ -566,12 +566,12 @@
           <tr>
             <td>Kafka &rarr; Bronze</td>
             <td><span class="guar g-once">exactly-once</span></td>
-            <td class="mono">Structured Streaming checkpoint + Delta atomic commit</td>
+            <td class="mono">checkpoint + Delta atomic commit; failOnDataLoss=true</td>
           </tr>
           <tr>
             <td>Bronze &rarr; Silver</td>
             <td><span class="guar g-once">effectively-once</span></td>
-            <td class="mono">MERGE on (business_id, observed_at) — re-process updates in place</td>
+            <td class="mono">MERGE on event_id — reprocessing updates in place</td>
           </tr>
           <tr>
             <td>Silver &rarr; Gold</td>

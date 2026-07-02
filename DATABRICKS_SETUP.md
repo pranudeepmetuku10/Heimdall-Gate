@@ -7,7 +7,8 @@ serverless model dictates the operating shape below.
 The goal of this document is a reproducible demo. By the end you will have:
 
 - A Unity Catalog with `bronze`, `silver`, `gold`, `dlq` schemas
-- Two Databricks jobs scheduled with `trigger(availableNow=True)`
+- Three Databricks jobs: Bronze and Silver as `trigger(availableNow=True)`
+  streaming jobs, and Gold as a scheduled batch recompute
 - A working Kafka -> Bronze -> Silver -> Gold path
 - A quarantine table populated with deliberately bad records
 
@@ -102,14 +103,14 @@ There are two equivalent paths. Pick one.
 
 1. In Databricks, go to **Workspace > Repos** and click **Add Repo**.
 2. Point it at your fork of this repository on GitHub.
-3. The job sources will be at `Repos/<you>/heimdall-gate/databricks/jobs/`.
+3. The job sources will be at `Repos/<you>/Heimdall-Gate/databricks/jobs/`.
 
 This is the cleanest path because you can iterate on the jobs locally and pull
 the latest version with a button.
 
 ### Option B: Workspace files
 
-1. In **Workspace > Users > your.email > heimdall-gate**, create a folder.
+1. In **Workspace > Users > your.email > Heimdall-Gate**, create a folder.
 2. Upload the four files from `databricks/jobs/` into it:
    - `00_bootstrap_tables.py`
    - `01_bronze_ingest.py`
@@ -243,8 +244,25 @@ Within a poll cycle you should see:
 1. Records appearing in Confluent Cloud's `heimdall.raw.business` topic browser
 2. Bronze row count climbing on the next Databricks scheduled run
 3. Silver populated shortly after
-4. DLQ table populated only if you intentionally introduce bad records (see
-   `scripts/smoke_test.sh --inject-bad`)
+
+The Delta `dlq.business` table fills only when a record reaches Bronze and then
+fails Silver validation. Because the producer validates before publishing, the
+normal path rarely produces one, so to demonstrate the quarantine path publish a
+malformed envelope directly onto the raw topic:
+
+```bash
+# .env still pointed at Confluent Cloud
+python -m ingest --inject-bad-raw
+```
+
+That envelope is structurally valid (so Bronze ingests it and Silver parses it)
+but violates business rules (`rating` out of range, negative `review_count`), so
+the Silver job routes it to `heimdall.dlq.business` on its next run.
+
+Note the two distinct DLQs: `--inject-bad-raw` exercises the Delta
+`dlq.business` table above, whereas the local `make smoke` / `python -m ingest
+--inject-bad` path exercises the separate producer-side Kafka topic
+`heimdall.dlq.ingest`, which the Databricks pipeline does not read.
 
 ---
 
@@ -259,10 +277,13 @@ FROM heimdall.silver.business_events
 ORDER BY observed_at DESC
 LIMIT 10;
 
--- Distribution of validation failures
-SELECT failure_reason, COUNT(*) AS n
+-- Distribution of validation failures, by rule.
+-- failure_reason is coarse (silver_validation | envelope_parse_failed); the
+-- per-rule detail lives in the failure_codes array, so explode it.
+SELECT code, COUNT(*) AS n
 FROM heimdall.dlq.business
-GROUP BY failure_reason
+LATERAL VIEW explode(failure_codes) t AS code
+GROUP BY code
 ORDER BY n DESC;
 
 -- Rating drift for a known business (replace business_id)
